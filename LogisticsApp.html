@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Logistics Log v31.1</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+        .app-grid { display: grid; grid-template-columns: 280px 1fr 450px; height: 100%; }
+        .nav-btn.active { background-color: rgba(59, 130, 246, 0.1); color: #3b82f6; border-right: 3px solid #3b82f6; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100">
+
+    <div id="auth-screen" class="fixed inset-0 bg-white dark:bg-slate-950 z-50 flex flex-col items-center justify-center p-4">
+        <div class="max-w-md w-full text-center space-y-8">
+            <div class="inline-flex p-6 rounded-3xl bg-primary-600 text-white text-5xl shadow-2xl">
+                <i class="fas fa-truck-fast"></i>
+            </div>
+            <h1 class="text-3xl font-black">Logistics Log v31.1</h1>
+            <div class="space-y-3">
+                <button onclick="login()" class="w-full py-4 rounded-xl bg-slate-900 text-white font-bold flex items-center justify-center gap-3">
+                    <i class="fab fa-microsoft text-xl"></i> Sign In
+                </button>
+            </div>
+            <div id="error-display" class="hidden text-red-600 text-xs bg-red-50 p-4 rounded-xl border border-red-200 text-left font-mono whitespace-pre-wrap"></div>
+        </div>
+    </div>
+
+    <header class="h-16 bg-white border-b flex items-center justify-between px-6 z-10">
+        <div class="text-xl font-black text-primary-600">LOGILOG <span class="text-slate-400 text-xs">v31.1</span></div>
+        <div class="flex items-center gap-4">
+             <button onclick="localStorage.clear(); location.reload();" class="text-[10px] font-bold text-red-500 uppercase border border-red-200 px-2 py-1 rounded">Reset App Cache</button>
+             <div id="user-display-name" class="text-xs font-bold">Guest</div>
+        </div>
+    </header>
+
+    <div id="app-ui" class="app-grid hidden">
+        <aside class="bg-white border-r p-4 flex flex-col gap-2">
+            <button onclick="setMode('today')" id="btn-today" class="nav-btn active w-full text-left p-3 rounded-xl font-bold text-xs">Today's Live Logs</button>
+            <button onclick="setMode('all')" id="btn-all" class="nav-btn w-full text-left p-3 rounded-xl font-bold text-xs">All History</button>
+            <div class="mt-auto">
+                <button onclick="fetchLiveData()" class="w-full py-3 bg-primary-600 text-white rounded-xl font-bold text-xs">Refresh from Flow</button>
+            </div>
+        </aside>
+
+        <main class="bg-white overflow-y-auto">
+            <table class="w-full text-left">
+                <tbody id="ticket-list" class="divide-y"></tbody>
+            </table>
+        </main>
+
+        <aside id="detail-panel" class="bg-slate-50 border-l p-6 hidden">
+            <h2 id="d-company" class="text-2xl font-black"></h2>
+            <p id="d-desc" class="mt-4 text-sm text-slate-600"></p>
+            <textarea id="d-notes" class="w-full mt-4 p-4 border rounded-xl h-40 text-xs" placeholder="Add notes..."></textarea>
+            <button onclick="saveLocal(true)" class="w-full mt-4 py-3 bg-slate-900 text-white rounded-xl font-bold uppercase text-xs">Save Updates</button>
+        </aside>
+    </div>
+
+    <script>
+        // Check this URL in Power Automate! If the Flow ID changed, this will 404/401.
+        const FLOW_URL = 'https://prod-36.westus.logic.azure.com:443/workflows/4553b342045e43a99e71ec6464016a5d/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=r9VIdV79vB-91t2fO9FvH6w_6H0vX7H9pL7S7J7G7Y0';
+
+        const msalClient = new msal.PublicClientApplication({
+            auth: { clientId: 'afe649b6-9c70-4b1a-8592-78588284c8ee', authority: 'https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401' },
+            cache: { cacheLocation: "localStorage" }
+        });
+
+        let db = JSON.parse(localStorage.getItem('logistics_db_v31')) || [];
+        let currentMode = 'today';
+
+        window.onload = () => {
+            const accounts = msalClient.getAllAccounts();
+            if (accounts.length > 0) {
+                msalClient.setActiveAccount(accounts[0]);
+                document.getElementById('auth-screen').classList.add('hidden');
+                document.getElementById('app-ui').classList.remove('hidden');
+                document.getElementById('user-display-name').innerText = accounts[0].name;
+                fetchLiveData();
+            }
+        };
+
+        async function login() {
+            const res = await msalClient.loginPopup({ scopes: ["User.Read"] });
+            msalClient.setActiveAccount(res.account);
+            location.reload();
+        }
+
+        async function fetchLiveData() {
+            try {
+                const response = await fetch(FLOW_URL, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: "Refresh" })
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // This handles both the "schema" wrap and the direct "value" wrap
+                    const rows = data.schema?.data || (typeof data.body === 'string' ? JSON.parse(data.body).value : data.value);
+                    if (rows) ingest(rows);
+                } else {
+                    const errDisp = document.getElementById('error-display');
+                    errDisp.innerText = `Flow Error (${response.status}):\n${JSON.stringify(data, null, 2)}`;
+                    errDisp.classList.remove('hidden');
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function ingest(rows) {
+            rows.forEach(r => {
+                const item = {
+                    id: r.ID || r.ItemInternalId || Math.random().toString(),
+                    company: r.Company || r["Company Name and/or Delivery Location Name? "] || "Unknown",
+                    issue: r.Issue || r["Issue?"] || "No Issue Listed",
+                    desc: r.Description || r["Description:"] || "",
+                    date: (r["Start time"] || "").split('T')[0],
+                    status: r.Status || "Pending"
+                };
+                const existing = db.findIndex(x => x.id === item.id);
+                if (existing > -1) db[existing] = {...db[existing], ...item};
+                else db.push(item);
+            });
+            saveLocal(true);
+        }
+
+        function render() {
+            const list = document.getElementById('ticket-list');
+            list.innerHTML = '';
+            const today = new Date().toISOString().split('T')[0];
+            
+            db.filter(t => currentMode === 'all' || t.date === today).forEach(t => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-50 cursor-pointer border-b";
+                tr.onclick = () => {
+                    document.getElementById('detail-panel').classList.remove('hidden');
+                    document.getElementById('d-company').innerText = t.company;
+                    document.getElementById('d-desc').innerText = t.desc;
+                    document.getElementById('d-notes').value = t.notes || '';
+                };
+                tr.innerHTML = `<td class="p-4 text-xs font-bold">${t.company}</td><td class="p-4 text-xs text-slate-500">${t.issue}</td>`;
+                list.appendChild(tr);
+            });
+        }
+
+        function saveLocal(reRender = false) {
+            localStorage.setItem('logistics_db_v31', JSON.stringify(db));
+            if (reRender) render();
+        }
+
+        function setMode(m) {
+            currentMode = m;
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + m).classList.add('active');
+            render();
+        }
+    </script>
+</body>
+</html>
